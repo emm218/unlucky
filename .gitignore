@@ -1,7 +1,6 @@
 # output
 *.o
-c-trace
+unlucky
 
 # test artifacts
-*.png
 log
