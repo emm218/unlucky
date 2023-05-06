@@ -7,7 +7,7 @@ debug: unlucky
 release: CFLAGS+=-O2
 release: unlucky
 
-unlucky: 
+unlucky: instructions.o
 
 clean:
 	rm -f *.o unlucky
