@@ -43,7 +43,7 @@ struct {
 	size_t cpu_timestamp, ppu_timestamp;
 	uint8_t *mem_map[0x20];
 	uint16_t pc;
-	uint8_t acc, irx, iry, status;
+	uint8_t sp, acc, irx, iry, status;
 } processor_state;
 
 int fmt_scaled(size_t, char *, size_t);
@@ -56,10 +56,10 @@ main(int argc, char **argv)
 	struct ines_header header;
 	char human_scaled[FMT_SCALED_STRSIZE];
 	FILE *rom;
-	uint8_t mapper, *cur, (*prg_rom)[PRG_ROM_CHUNKSIZE],
-	    (*chr_rom)[CHR_ROM_CHUNKSIZE];
+	uint8_t mapper, (*prg_rom)[PRG_ROM_CHUNKSIZE],
+	    (*chr_rom)[CHR_ROM_CHUNKSIZE], cpu_ram[0x800], sram[0x2000];
 	size_t prg_rom_size, chr_rom_size;
-	int offset;
+	int i;
 
 	if (argc < 2) {
 		usage();
@@ -96,8 +96,6 @@ main(int argc, char **argv)
 		fseek(rom, TRAINER_SIZE, SEEK_CUR);
 	}
 
-	printf("\n");
-
 	if (!(prg_rom = malloc(prg_rom_size))) {
 		fprintf(stderr, "%s: out of memory!\n", argv[0]);
 		goto error;
@@ -116,28 +114,45 @@ main(int argc, char **argv)
 
 	fclose(rom);
 
-	// this should read whatever's at 0xFFFC
+	// set up processor state
+	processor_state.cpu_timestamp = 0;
+	processor_state.ppu_timestamp = 0;
+	processor_state.acc = 0;
+	processor_state.irx = 0;
+	processor_state.iry = 0;
+	processor_state.sp = 0xFF;
+	processor_state.status = 0;
 	processor_state.pc = prg_rom[0][0x3FFC];
+
 	printf("entry point: 0x%04X\n", processor_state.pc);
 
-	/* cur = prg_rom[0]; */
-	/* while (cur < (&(prg_rom[0][0]) + prg_rom_size)) { */
-	/* 	struct instruction cur_instr = instruction_set[*cur]; */
-	/* 	offset = print_instruction(cur_instr, cur + 1, */
-	/* 	    cur - prg_rom[0]); */
-	/* 	if (offset < 0) { */
-	/* 		fprintf(stderr, */
-	/* 		    "%s: invalid instruction 0x%02X at offset
-	 * 0x%04lX\n",
-	 */
-	/* 		    argv[0], *cur, cur - prg_rom[0]); */
-	/* 		return 1; */
-	/* 	} */
-	/* 	cur += offset; */
-	/* } */
+	printf("\n");
 
-	(void)cur;
-	(void)offset;
+	// set up memory map
+	// mirror cpu ram 4 times
+	for (i = 0; i < 4; i++) {
+		processor_state.mem_map[i] = cpu_ram;
+	}
+
+	// zero out memory mapped IO and expansion ROM
+	for (i = 4; i < 12; i++) {
+		processor_state.mem_map[i] = NULL;
+	}
+
+	// set up sram
+	for (i = 0; i < 4; i++) {
+		processor_state.mem_map[i + 12] = sram + 0x800 * i;
+	}
+
+	// mirror the 1 chunk of PRG ROM twice
+	for (i = 0; i < 16; i++) {
+		processor_state.mem_map[i + 16] = prg_rom[0] + 0x800 * (i % 8);
+	}
+
+	printf("memory map:\n");
+	for (i = 0; i < 0x20; i++) {
+		printf("0x%04X: %p\n", i * 0x800, processor_state.mem_map[i]);
+	}
 
 	return 0;
 
