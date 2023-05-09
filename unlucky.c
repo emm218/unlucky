@@ -9,15 +9,27 @@
 #define VERSION "0.1"
 #define FMT_SCALED_STRSIZE 16
 
+#define MIRRORING 1
+#define PERSISTENT_MEM 1 << 1
+#define HAS_TRAINER 1 << 2
+#define IGNORE_MIRRORING 1 << 3
+
 #define MAGIC_NUMBER 0x1A53454E
 #define PRG_ROM_CHUNKSIZE 0x4000
 #define CHR_ROM_CHUNKSIZE 0x2000
 #define TRAINER_SIZE 0x200
 
-#define MIRRORING 1
-#define PERSISTENT_MEM 1 << 1
-#define HAS_TRAINER 1 << 2
-#define IGNORE_MIRRORING 1 << 3
+#define PAL_CPU_CYCLE 16
+#define NTSC_CPU_CYCLE 15
+#define PPU_CYCLE 5
+
+#define CARRY_FLAG 0x01
+#define ZERO_FLAG 0x02
+#define INTERRUPT_DISABLE 0x04
+#define DECIMAL_MODE 0x08 // ignored by NES but keeping it for completeness
+#define BREAK_BIT 0x10
+#define OVERFLOW_FLAG 0x20
+#define NEGATIVE_FLAG 0x40
 
 struct ines_header {
 	uint32_t magic;
@@ -27,7 +39,15 @@ struct ines_header {
 	char garbage[5];
 };
 
+struct {
+	size_t cpu_timestamp, ppu_timestamp;
+	uint8_t *mem_map[0x20];
+	uint16_t pc;
+	uint8_t acc, irx, iry, status;
+} processor_state;
+
 int fmt_scaled(size_t, char *, size_t);
+int print_instruction(struct instruction, const void *const, long int);
 void usage(void);
 
 int
@@ -39,6 +59,7 @@ main(int argc, char **argv)
 	uint8_t mapper, *cur, (*prg_rom)[PRG_ROM_CHUNKSIZE],
 	    (*chr_rom)[CHR_ROM_CHUNKSIZE];
 	size_t prg_rom_size, chr_rom_size;
+	int offset;
 
 	if (argc < 2) {
 		usage();
@@ -95,83 +116,28 @@ main(int argc, char **argv)
 
 	fclose(rom);
 
-	cur = prg_rom[0];
-	while (cur < (&(prg_rom[0][0]) + prg_rom_size)) {
-		struct instruction cur_instr = instruction_set[*cur];
-		if (!cur_instr.opcode) {
-			fprintf(stderr,
-			    "%s: invalid instruction 0x%2X at offset %4lX\n",
-			    argv[0], *cur, cur - prg_rom[0]);
-			return 1;
-		}
-		switch (cur_instr.mode) {
-		case IMP:
-			printf("%s\n", opcodes[cur_instr.opcode]);
-			cur += 1;
-			break;
-		case ACC:
-			printf("%s A\n", opcodes[cur_instr.opcode]);
-			cur += 1;
-			break;
-		case IMM:
-			printf("%s #$%2X\n", opcodes[cur_instr.opcode],
-			    *(cur + 1));
-			cur += 2;
-			break;
-		case ZRP:
-			printf("%s $%2X\n", opcodes[cur_instr.opcode],
-			    *(cur + 1));
-			cur += 2;
-			break;
-		case ZPX:
-			printf("%s $%2X,X\n", opcodes[cur_instr.opcode],
-			    *(cur + 1));
-			cur += 2;
-			break;
-		case ZPY:
-			printf("%s $%2X,Y\n", opcodes[cur_instr.opcode],
-			    *(cur + 1));
-			cur += 2;
-			break;
-		case REL:
-			printf("%s %d\n", opcodes[cur_instr.opcode],
-			    *((signed char *)cur + 1));
-			cur += 2;
-			break;
-		case ABS:
-			printf("%s $%4X\n", opcodes[cur_instr.opcode],
-			    *((uint16_t *)(cur + 1)));
-			cur += 3;
-			break;
-		case ABX:
-			printf("%s $%4X,X\n", opcodes[cur_instr.opcode],
-			    *((uint16_t *)(cur + 1)));
-			cur += 3;
-			break;
-		case ABY:
-			printf("%s $%4X,Y\n", opcodes[cur_instr.opcode],
-			    *((uint16_t *)(cur + 1)));
-			cur += 3;
-			break;
-		case IND:
-			printf("%s ($%4X)\n", opcodes[cur_instr.opcode],
-			    *((uint16_t *)(cur + 1)));
-			cur += 3;
-			break;
-		case IDX:
-			printf("%s ($%2X,X)\n", opcodes[cur_instr.opcode],
-			    *(cur + 1));
-			cur += 2;
-			break;
-		case IDY:
-			printf("%s ($%2X),Y\n", opcodes[cur_instr.opcode],
-			    *(cur + 1));
-			cur += 2;
-			break;
-		}
-	}
+	// this should read whatever's at 0xFFFC
+	processor_state.pc = prg_rom[0][0x3FFC];
+	printf("entry point: 0x%04X\n", processor_state.pc);
+
+	/* cur = prg_rom[0]; */
+	/* while (cur < (&(prg_rom[0][0]) + prg_rom_size)) { */
+	/* 	struct instruction cur_instr = instruction_set[*cur]; */
+	/* 	offset = print_instruction(cur_instr, cur + 1, */
+	/* 	    cur - prg_rom[0]); */
+	/* 	if (offset < 0) { */
+	/* 		fprintf(stderr, */
+	/* 		    "%s: invalid instruction 0x%02X at offset
+	 * 0x%04lX\n",
+	 */
+	/* 		    argv[0], *cur, cur - prg_rom[0]); */
+	/* 		return 1; */
+	/* 	} */
+	/* 	cur += offset; */
+	/* } */
 
 	(void)cur;
+	(void)offset;
 
 	return 0;
 
@@ -189,6 +155,58 @@ error:
 	if (chr_rom)
 		free(chr_rom);
 	return 1;
+}
+
+int
+print_instruction(struct instruction instr, const void *const op,
+    long int offset)
+{
+	printf("0x%04lX\t%s", offset, opcodes[instr.opcode]);
+	if (!instr.opcode)
+		return -1;
+	switch (instr.mode) {
+	case IMP:
+		printf("\n");
+		return 1;
+	case ACC:
+		printf(" A\n");
+		return 1;
+	case IMM:
+		printf(" #$%02X\n", *(uint8_t *)op);
+		return 2;
+	case ZRP:
+		printf(" $%02X\n", *(uint8_t *)op);
+		return 2;
+	case ZPX:
+		printf(" $%02X,X\n", *(uint8_t *)op);
+		return 2;
+	case ZPY:
+		printf(" $%02X,Y\n", *(uint8_t *)op);
+		return 2;
+	case REL:
+		printf(" %d\n", *(signed char *)op);
+		return 2;
+	case ABS:
+		printf(" $%04X\n", *(uint16_t *)op);
+		return 3;
+	case ABX:
+		printf(" $%04X,X\n", *(uint16_t *)op);
+		return 3;
+	case ABY:
+		printf(" $%04X,Y\n", *(uint16_t *)op);
+		return 3;
+	case IND:
+		printf(" ($%04X)\n", *(uint16_t *)op);
+		return 3;
+	case IDX:
+		printf(" ($%02X,X)\n", *(uint8_t *)op);
+		return 2;
+	case IDY:
+		printf(" ($%02X),Y\n", *(uint8_t *)op);
+		return 2;
+	default:
+		return -1;
+	}
 }
 
 int
