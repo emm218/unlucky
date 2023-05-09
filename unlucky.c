@@ -40,15 +40,15 @@ struct ines_header {
 	char garbage[5];
 };
 
-struct {
-	size_t cpu_timestamp, ppu_timestamp;
-	uint8_t *page_table[0x100];
-	uint16_t pc;
-	uint8_t sp, acc, irx, iry, status;
-} processor_state;
+size_t cpu_timestamp, ppu_timestamp;
+uint8_t *page_table[0x100];
+uint16_t pc;
+uint8_t sp, acc, irx, iry, status;
+
+void run_cpu(size_t);
+void run_ppu(size_t);
 
 int fmt_scaled(size_t, char *, size_t);
-int print_instruction(struct instruction, const void *const, long int);
 void usage(void);
 
 int
@@ -119,55 +119,48 @@ main(int argc, char **argv)
 	fclose(rom);
 
 	// set up processor state
-	processor_state.cpu_timestamp = 0;
-	processor_state.ppu_timestamp = 0;
-	processor_state.acc = 0;
-	processor_state.irx = 0;
-	processor_state.iry = 0;
-	processor_state.sp = 0xFF;
-	processor_state.status = 0;
-	processor_state.pc = prg_rom[0][0x3FFC] + 0x8000;
+	cpu_timestamp = 0;
+	ppu_timestamp = 0;
+	acc = 0;
+	irx = 0;
+	iry = 0;
+	sp = 0xFF;
+	status = 0;
+	pc = prg_rom[0][0x3FFC] + 0x8000;
 
-	printf("entry point: 0x%04X\n", processor_state.pc);
+	printf("entry point: 0x%04X\n", pc);
 
 	printf("\n");
 
 	// set up memory map
 	// mirror cpu ram 4 times
 	for (i = 0; i < 0x20; i++) {
-		processor_state.page_table[i] = cpu_ram +
-		    NES_PAGE_SIZE * (i % 8);
+		page_table[i] = cpu_ram + NES_PAGE_SIZE * (i % 8);
 	}
 
 	// zero out memory mapped IO and expansion ROM
 	for (; i < 0x60; i++) {
-		processor_state.page_table[i] = NULL;
+		page_table[i] = NULL;
 	}
 
 	// set up sram
 	for (; i < 0x80; i++) {
-		processor_state.page_table[i] = sram +
-		    NES_PAGE_SIZE * (i - 0x60);
+		page_table[i] = sram + NES_PAGE_SIZE * (i - 0x60);
 	}
 
 	// mirror the 1 chunk of PRG ROM twice
 	for (; i < 0x100; i++) {
-		processor_state.page_table[i] = prg_rom[0] +
-		    NES_PAGE_SIZE * (i % 0x40);
+		page_table[i] = prg_rom[0] + NES_PAGE_SIZE * (i % 0x40);
 	}
 
 	printf("memory map:\n");
 	for (i = 0; i < 0x100; i += 8) {
-		printf("0x%04X: %p\n", i * NES_PAGE_SIZE,
-		    processor_state.page_table[i]);
+		printf("0x%04X: %p\n", i * NES_PAGE_SIZE, page_table[i]);
 	}
 
 	printf("\n");
 
-	uint8_t pc_upper = processor_state.pc / 0x100;
-	uint8_t pc_lower = processor_state.pc & 0xFF;
-	uint8_t *cur = &processor_state.page_table[pc_upper][pc_lower];
-	print_instruction(instruction_set[*cur], cur + 1, processor_state.pc);
+	run_cpu(75);
 
 	return 0;
 
@@ -187,56 +180,49 @@ error:
 	return 1;
 }
 
-int
-print_instruction(struct instruction instr, const void *const op,
-    long int offset)
+void
+run_cpu(size_t until)
 {
-	printf("0x%04lX\t%s", offset, opcodes[instr.opcode]);
-	if (!instr.opcode)
-		return -1;
-	switch (instr.mode) {
-	case IMP:
-		printf("\n");
-		return 1;
-	case ACC:
-		printf(" A\n");
-		return 1;
-	case IMM:
-		printf(" #$%02X\n", *(uint8_t *)op);
-		return 2;
-	case ZRP:
-		printf(" $%02X\n", *(uint8_t *)op);
-		return 2;
-	case ZPX:
-		printf(" $%02X,X\n", *(uint8_t *)op);
-		return 2;
-	case ZPY:
-		printf(" $%02X,Y\n", *(uint8_t *)op);
-		return 2;
-	case REL:
-		printf(" %d\n", *(signed char *)op);
-		return 2;
-	case ABS:
-		printf(" $%04X\n", *(uint16_t *)op);
-		return 3;
-	case ABX:
-		printf(" $%04X,X\n", *(uint16_t *)op);
-		return 3;
-	case ABY:
-		printf(" $%04X,Y\n", *(uint16_t *)op);
-		return 3;
-	case IND:
-		printf(" ($%04X)\n", *(uint16_t *)op);
-		return 3;
-	case IDX:
-		printf(" ($%02X,X)\n", *(uint8_t *)op);
-		return 2;
-	case IDY:
-		printf(" ($%02X),Y\n", *(uint8_t *)op);
-		return 2;
-	default:
-		return -1;
+	uint8_t pc_upper, pc_lower, op8, *cur;
+	uint16_t op16;
+
+	while (cpu_timestamp < until) {
+		pc_upper = pc / 0x100;
+		pc_lower = pc & 0xFF;
+		cur = &page_table[pc_upper][pc_lower];
+		op8 = *(cur + 1);
+		op16 = *(uint16_t *)(cur + 1);
+		printf("0x%02X ", *cur);
+		print_instruction(instruction_set[*cur], cur + 1, pc);
+		switch (page_table[pc_upper][pc_lower]) {
+		case 0x78: // SEI
+			status |= INTERRUPT_DISABLE;
+			goto one_byte;
+		case 0xAD: // LDA absolute
+			acc = op16;
+			goto three_byte;
+		case 0xD8: // CLD - does nothing on NES
+			goto one_byte;
+		default:
+			cpu_timestamp += 9999;
+			break;
+		three_byte:
+			cpu_timestamp += NTSC_CPU_CYCLE;
+			pc++;
+			cpu_timestamp += NTSC_CPU_CYCLE;
+			pc++;
+		one_byte:
+			cpu_timestamp += 2 * NTSC_CPU_CYCLE;
+			pc++;
+			break;
+		}
 	}
+	(void)op8;
+	for (int i = 7; i >= 0; i--) {
+		putc((status >> i & 1) ? '1' : '0', stdout);
+	}
+	putc('\n', stdout);
+	return;
 }
 
 int

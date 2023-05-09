@@ -1,3 +1,6 @@
+#include <stdint.h>
+#include <stdio.h>
+
 #include "instructions.h"
 
 struct instruction instruction_set[0x100] = {
@@ -318,3 +321,55 @@ char *opcodes[] = {
 	"txs",
 	"tya",
 };
+
+int
+print_instruction(struct instruction instr, const void *const op,
+    long int offset)
+{
+	printf("0x%04lX\t%s", offset, opcodes[instr.opcode]);
+	if (!instr.opcode)
+		return -1;
+	switch (instr.mode) {
+	case IMP:
+		printf("\n");
+		return 1;
+	case ACC:
+		printf(" A\n");
+		return 1;
+	case IMM:
+		printf(" #$%02X\n", *(uint8_t *)op);
+		return 2;
+	case ZRP:
+		printf(" $%02X\n", *(uint8_t *)op);
+		return 2;
+	case ZPX:
+		printf(" $%02X,X\n", *(uint8_t *)op);
+		return 2;
+	case ZPY:
+		printf(" $%02X,Y\n", *(uint8_t *)op);
+		return 2;
+	case REL:
+		printf(" %d\n", *(signed char *)op);
+		return 2;
+	case ABS:
+		printf(" $%04X\n", *(uint16_t *)op);
+		return 3;
+	case ABX:
+		printf(" $%04X,X\n", *(uint16_t *)op);
+		return 3;
+	case ABY:
+		printf(" $%04X,Y\n", *(uint16_t *)op);
+		return 3;
+	case IND:
+		printf(" ($%04X)\n", *(uint16_t *)op);
+		return 3;
+	case IDX:
+		printf(" ($%02X,X)\n", *(uint8_t *)op);
+		return 2;
+	case IDY:
+		printf(" ($%02X),Y\n", *(uint8_t *)op);
+		return 2;
+	default:
+		return -1;
+	}
+}
