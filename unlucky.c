@@ -18,6 +18,7 @@
 #define PRG_ROM_CHUNKSIZE 0x4000
 #define CHR_ROM_CHUNKSIZE 0x2000
 #define TRAINER_SIZE 0x200
+#define NES_PAGE_SIZE 0x100
 
 #define PAL_CPU_CYCLE 16
 #define NTSC_CPU_CYCLE 15
@@ -41,7 +42,7 @@ struct ines_header {
 
 struct {
 	size_t cpu_timestamp, ppu_timestamp;
-	uint8_t *mem_map[0x20];
+	uint8_t *page_table[0x100];
 	uint16_t pc;
 	uint8_t sp, acc, irx, iry, status;
 } processor_state;
@@ -60,6 +61,9 @@ main(int argc, char **argv)
 	    (*chr_rom)[CHR_ROM_CHUNKSIZE], cpu_ram[0x800], sram[0x2000];
 	size_t prg_rom_size, chr_rom_size;
 	int i;
+
+	prg_rom = NULL;
+	chr_rom = NULL;
 
 	if (argc < 2) {
 		usage();
@@ -122,7 +126,7 @@ main(int argc, char **argv)
 	processor_state.iry = 0;
 	processor_state.sp = 0xFF;
 	processor_state.status = 0;
-	processor_state.pc = prg_rom[0][0x3FFC];
+	processor_state.pc = prg_rom[0][0x3FFC] + 0x8000;
 
 	printf("entry point: 0x%04X\n", processor_state.pc);
 
@@ -130,29 +134,40 @@ main(int argc, char **argv)
 
 	// set up memory map
 	// mirror cpu ram 4 times
-	for (i = 0; i < 4; i++) {
-		processor_state.mem_map[i] = cpu_ram;
+	for (i = 0; i < 0x20; i++) {
+		processor_state.page_table[i] = cpu_ram +
+		    NES_PAGE_SIZE * (i % 8);
 	}
 
 	// zero out memory mapped IO and expansion ROM
-	for (i = 4; i < 12; i++) {
-		processor_state.mem_map[i] = NULL;
+	for (; i < 0x60; i++) {
+		processor_state.page_table[i] = NULL;
 	}
 
 	// set up sram
-	for (i = 0; i < 4; i++) {
-		processor_state.mem_map[i + 12] = sram + 0x800 * i;
+	for (; i < 0x80; i++) {
+		processor_state.page_table[i] = sram +
+		    NES_PAGE_SIZE * (i - 0x60);
 	}
 
 	// mirror the 1 chunk of PRG ROM twice
-	for (i = 0; i < 16; i++) {
-		processor_state.mem_map[i + 16] = prg_rom[0] + 0x800 * (i % 8);
+	for (; i < 0x100; i++) {
+		processor_state.page_table[i] = prg_rom[0] +
+		    NES_PAGE_SIZE * (i % 0x40);
 	}
 
 	printf("memory map:\n");
-	for (i = 0; i < 0x20; i++) {
-		printf("0x%04X: %p\n", i * 0x800, processor_state.mem_map[i]);
+	for (i = 0; i < 0x100; i += 8) {
+		printf("0x%04X: %p\n", i * NES_PAGE_SIZE,
+		    processor_state.page_table[i]);
 	}
+
+	printf("\n");
+
+	uint8_t pc_upper = processor_state.pc / 0x100;
+	uint8_t pc_lower = processor_state.pc & 0xFF;
+	uint8_t *cur = &processor_state.page_table[pc_upper][pc_lower];
+	print_instruction(instruction_set[*cur], cur + 1, processor_state.pc);
 
 	return 0;
 
