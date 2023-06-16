@@ -1,5 +1,6 @@
 # output
 *.o
+.depend
 unlucky
 
 # test artifacts
