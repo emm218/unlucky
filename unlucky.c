@@ -6,6 +6,9 @@
 
 #include "instructions.h"
 
+#define XSTR(x) #x
+#define STR(x) XSTR(x)
+
 #define VERSION "0.1"
 #define FMT_SCALED_STRSIZE 16
 
@@ -40,13 +43,31 @@ struct ines_header {
 	char garbage[5];
 };
 
-size_t cpu_timestamp, ppu_timestamp;
+time_t cpu_timestamp, ppu_timestamp;
 uint8_t *page_table[0x100];
-uint16_t pc;
-uint8_t sp, acc, irx, iry, status;
+uint8_t bus_value;
 
-void run_cpu(size_t);
-void run_ppu(size_t);
+struct {
+	uint16_t pc;
+	uint8_t sp;
+	uint8_t status;
+	uint8_t acc;
+	uint8_t irx;
+	uint8_t iry;
+} cpu;
+
+struct {
+	uint8_t cr1;
+	uint8_t cr2;
+	uint8_t status;
+	uint8_t sprite_addr;
+	uint8_t sprite_io;
+	uint16_t vram_addr;
+	uint8_t vram_io;
+} ppu;
+
+void run_cpu(time_t);
+void run_ppu(time_t);
 
 int fmt_scaled(size_t, char *, size_t);
 void usage(void);
@@ -121,14 +142,14 @@ main(int argc, char **argv)
 	// set up processor state
 	cpu_timestamp = 0;
 	ppu_timestamp = 0;
-	acc = 0;
-	irx = 0;
-	iry = 0;
-	sp = 0xFF;
-	status = 0;
-	pc = prg_rom[0][0x3FFC] + 0x8000;
+	cpu.acc = 0;
+	cpu.irx = 0;
+	cpu.iry = 0;
+	cpu.sp = 0xFF;
+	cpu.status = 0;
+	cpu.pc = prg_rom[0][0x3FFC] + 0x8000;
 
-	printf("entry point: 0x%04X\n", pc);
+	printf("entry point: 0x%04X\n", cpu.pc);
 
 	printf("\n");
 
@@ -180,49 +201,162 @@ error:
 	return 1;
 }
 
+#define GET_CPU_BUS(hi, lo, out)                                             \
+	if (hi >= 0x20 && hi < 0x60) {                                       \
+		if (hi == 0x20) { /* ppu registers */                        \
+			run_ppu(cpu_timestamp);                              \
+			switch (lo) {                                        \
+			case 2:                                              \
+				/*                                           \
+				 * TODO: technically only the first 3 bits   \
+				 * should be read and the last 5 bits of the \
+				 * PPU status register should be open bus    \
+				 */                                          \
+				out = ppu.status;                            \
+				break;                                       \
+			default:                                             \
+				out = bus_value;                             \
+				break;                                       \
+			}                                                    \
+		} else {                                                     \
+			out = bus_value;                                     \
+		}                                                            \
+	} else                                                               \
+		out = page_table[hi][lo];                                    \
+	bus_value = out;
+
 void
-run_cpu(size_t until)
+run_cpu(time_t until)
 {
-	uint8_t pc_upper, pc_lower, op8, *cur;
-	uint16_t op16;
+	uint8_t pc_hi, pc_lo, addr_hi, addr_lo, arg, arg_hi, cur;
+	uint16_t tmp;
+	struct instruction ins;
 
 	while (cpu_timestamp < until) {
-		pc_upper = pc / 0x100;
-		pc_lower = pc & 0xFF;
-		cur = &page_table[pc_upper][pc_lower];
-		op8 = *(cur + 1);
-		op16 = *(uint16_t *)(cur + 1);
-		printf("0x%02X ", *cur);
-		print_instruction(instruction_set[*cur], cur + 1, pc);
-		switch (page_table[pc_upper][pc_lower]) {
-		case 0x78: // SEI
-			status |= INTERRUPT_DISABLE;
-			goto one_byte;
-		case 0xAD: // LDA absolute
-			acc = op16;
-			goto three_byte;
-		case 0xD8: // CLD - does nothing on NES
-			goto one_byte;
-		default:
-			cpu_timestamp += 9999;
+		pc_hi = cpu.pc / 0x100;
+		pc_lo = cpu.pc & 0xFF;
+
+		GET_CPU_BUS(pc_hi, pc_lo, cur);
+		ins = instruction_set[cur];
+		printf("0x%04X\t%s", cpu.pc, opcodes[ins.opcode]);
+
+		switch (ins.mode) {
+		case IMP:
+			printf("\n");
 			break;
-		three_byte:
-			cpu_timestamp += NTSC_CPU_CYCLE;
-			pc++;
-			cpu_timestamp += NTSC_CPU_CYCLE;
-			pc++;
-		one_byte:
-			cpu_timestamp += 2 * NTSC_CPU_CYCLE;
-			pc++;
+		case ACC:
+			printf(" A\n");
+			arg = cpu.acc;
+			break;
+		case REL:
+			GET_CPU_BUS(pc_hi, pc_lo + 1, arg);
+			printf(" #$%d\n", *(int8_t *)&arg);
+			cpu.pc++;
+			break;
+		case IMM:
+			GET_CPU_BUS(pc_hi, pc_lo + 1, arg);
+			printf(" #$%02X\n", arg);
+			cpu.pc++;
+			break;
+		case ZRP:
+			GET_CPU_BUS(pc_hi, pc_lo + 1, addr_lo);
+			printf(" $%02X\n", addr_lo);
+			arg = page_table[0][addr_lo];
+			cpu.pc++;
+			break;
+		case ZPX:
+			GET_CPU_BUS(pc_hi, pc_lo + 1, addr_lo);
+			printf(" $%02X,X\n", addr_lo);
+			arg = page_table[0][(addr_lo + cpu.irx) & 0xFF];
+			cpu.pc++;
+			break;
+		case ZPY:
+			GET_CPU_BUS(pc_hi, pc_lo + 1, addr_lo);
+			printf(" $%02X,Y\n", addr_lo);
+			arg = page_table[0][(addr_lo + cpu.iry) & 0xFF];
+			cpu.pc++;
+			break;
+		case ABS:
+			GET_CPU_BUS(pc_hi, pc_lo + 1, addr_lo);
+			GET_CPU_BUS(pc_hi, pc_lo + 2, addr_hi);
+			printf(" $%02X%02X\n", addr_hi, addr_lo);
+			GET_CPU_BUS(addr_hi, addr_lo, arg);
+			cpu.pc += 2;
+			break;
+		case ABX:
+			GET_CPU_BUS(pc_hi, pc_lo + 1, addr_lo);
+			GET_CPU_BUS(pc_hi, pc_lo + 2, addr_hi);
+			printf(" $%02X%02X,X\n", addr_hi, addr_lo);
+			tmp = addr_lo + cpu.irx;
+			addr_hi += tmp >> 8;
+			/* penalty if page boundary crossed */
+			cpu_timestamp += NTSC_CPU_CYCLE * tmp >> 8;
+			addr_lo = tmp & 0xFF;
+			GET_CPU_BUS(addr_hi, addr_lo, arg);
+			cpu.pc += 2;
+			break;
+		case ABY:
+			GET_CPU_BUS(pc_hi, pc_lo + 1, addr_lo);
+			GET_CPU_BUS(pc_hi, pc_lo + 2, addr_hi);
+			printf(" $%02X%02X,Y\n", addr_hi, addr_lo);
+			tmp = addr_lo + cpu.iry;
+			addr_hi += tmp >> 8;
+			/* penalty if page boundary crossed */
+			cpu_timestamp += NTSC_CPU_CYCLE * tmp >> 8;
+			addr_lo = tmp & 0xFF;
+			GET_CPU_BUS(addr_hi, addr_lo, arg);
+			cpu.pc += 2;
+			break;
+		case IND:
+			GET_CPU_BUS(pc_hi, pc_lo + 1, addr_lo);
+			GET_CPU_BUS(pc_hi, pc_lo + 2, addr_hi);
+			printf(" ($%02X%02X)\n", addr_hi, addr_lo);
+			GET_CPU_BUS(addr_hi, addr_lo, arg);
+			GET_CPU_BUS(addr_hi, addr_lo + 1, arg_hi);
+			cpu.pc += 2;
+			break;
+		case IDX:
+			GET_CPU_BUS(pc_hi, pc_lo + 1, addr_lo);
+			printf(" ($%02X,X)\n", addr_lo);
+			addr_hi = page_table[0][(addr_lo + cpu.irx + 1) & 0xFF];
+			addr_lo = page_table[0][(addr_lo + cpu.irx) & 0xFF];
+			GET_CPU_BUS(addr_hi, addr_lo, arg);
+			cpu.pc++;
+			break;
+		case IDY:
+			GET_CPU_BUS(pc_hi, pc_lo + 1, addr_lo);
+			printf(" ($%02X),Y\n", addr_lo);
+			addr_hi = page_table[0][(addr_lo + 1) & 0xFF];
+			addr_lo = page_table[0][addr_lo];
+			GET_CPU_BUS(addr_hi, addr_lo, arg);
+			tmp = addr_lo + cpu.iry;
+			addr_hi += tmp >> 8;
+			/* penalty if page boundary crossed */
+			cpu_timestamp += NTSC_CPU_CYCLE * tmp >> 8;
+			addr_lo = tmp & 0xFF;
+			GET_CPU_BUS(addr_hi, addr_lo, arg);
+			cpu.pc++;
 			break;
 		}
+
+		cpu.pc++;
+		cpu_timestamp += NTSC_CPU_CYCLE * ins.cycles;
 	}
-	(void)op8;
 	for (int i = 7; i >= 0; i--) {
-		putc((status >> i & 1) ? '1' : '0', stdout);
+		putc((cpu.status >> i & 1) ? '1' : '0', stdout);
 	}
 	putc('\n', stdout);
 	return;
+}
+
+void
+run_ppu(time_t until)
+{
+	printf("hello from the ppu :)\n");
+	while (ppu_timestamp < until) {
+		ppu_timestamp += PPU_CYCLE;
+	}
+	exit(0);
 }
 
 int
@@ -248,6 +382,6 @@ void
 usage()
 {
 	fprintf(stderr,
-	    "USAGE: unlucky [OPTIONS] FILE\nTry"
-	    " 'unlucky --help' for more information\n");
+	    "USAGE: unlucky [OPTIONS] FILE\n"
+	    "Try 'unlucky --help' for more information\n");
 }

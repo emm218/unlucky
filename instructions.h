@@ -1,3 +1,5 @@
+#include <stdint.h>
+
 struct instruction {
 	enum {
 		UNDEFINED,
@@ -74,9 +76,8 @@ struct instruction {
 		IDX,
 		IDY,
 	} mode;
+	uint8_t cycles;
 };
 
 extern char *opcodes[NUM_OPCODES];
 extern struct instruction instruction_set[0x100];
-
-int print_instruction(struct instruction, const void *const, long int);
