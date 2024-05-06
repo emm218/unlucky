@@ -13,9 +13,9 @@
 #define FMT_SCALED_STRSIZE 16
 
 #define MIRRORING 1
-#define PERSISTENT_MEM 1 << 1
-#define HAS_TRAINER 1 << 2
-#define IGNORE_MIRRORING 1 << 3
+#define PERSISTENT_MEM 2
+#define HAS_TRAINER 4
+#define IGNORE_MIRRORING 8
 
 #define MAGIC_NUMBER 0x1A53454E
 #define PRG_ROM_CHUNKSIZE 0x4000
@@ -34,6 +34,9 @@
 #define BREAK_BIT 0x10
 #define OVERFLOW_FLAG 0x20
 #define NEGATIVE_FLAG 0x40
+
+#define PPU_STATUS_MASK 0b11100000
+#define VBLANK 0x40
 
 struct ines_header {
 	uint32_t magic;
@@ -181,7 +184,7 @@ main(int argc, char **argv)
 
 	printf("\n");
 
-	run_cpu(75);
+	run_cpu(1000);
 
 	return 0;
 
@@ -201,29 +204,34 @@ error:
 	return 1;
 }
 
-#define GET_CPU_BUS(hi, lo, out)                                             \
-	if (hi >= 0x20 && hi < 0x60) {                                       \
-		if (hi == 0x20) { /* ppu registers */                        \
-			run_ppu(cpu_timestamp);                              \
-			switch (lo) {                                        \
-			case 2:                                              \
-				/*                                           \
-				 * TODO: technically only the first 3 bits   \
-				 * should be read and the last 5 bits of the \
-				 * PPU status register should be open bus    \
-				 */                                          \
-				out = ppu.status;                            \
-				break;                                       \
-			default:                                             \
-				out = bus_value;                             \
-				break;                                       \
-			}                                                    \
-		} else {                                                     \
-			out = bus_value;                                     \
-		}                                                            \
-	} else                                                               \
-		out = page_table[hi][lo];                                    \
+#define GET_CPU_BUS(hi, lo, out)                                     \
+	if (hi >= 0x20 && hi < 0x40) {                               \
+		run_ppu(cpu_timestamp);                              \
+		switch (lo % 8) {                                    \
+		case 2:                                              \
+			/*                                           \
+			 * TODO: technically only the first 3 bits   \
+			 * should be read and the last 5 bits of the \
+			 * PPU status register should be open bus    \
+			 */                                          \
+			out = (ppu.status & PPU_STATUS_MASK) |       \
+			    (bus_value & ~PPU_STATUS_MASK);          \
+			ppu.status &= ~VBLANK;                       \
+			break;                                       \
+		default:                                             \
+			out = bus_value;                             \
+			break;                                       \
+		}                                                    \
+	} else if (hi >= 0x40 && hi < 0x60)                          \
+		out = bus_value;                                     \
+	else                                                         \
+		out = page_table[hi][lo];                            \
 	bus_value = out;
+
+#define WRITE_CPU_BUS(hi, lo, in)        \
+	if (page_table[hi])              \
+		page_table[hi][lo] = in; \
+	bus_value = in;
 
 void
 run_cpu(time_t until)
@@ -238,7 +246,8 @@ run_cpu(time_t until)
 
 		GET_CPU_BUS(pc_hi, pc_lo, cur);
 		ins = instruction_set[cur];
-		printf("0x%04X\t%s", cpu.pc, opcodes[ins.opcode]);
+		printf("%4ld 0x%04X\t%s", cpu_timestamp, cpu.pc,
+		    opcodes[ins.opcode]);
 
 		switch (ins.mode) {
 		case IMP:
@@ -338,10 +347,49 @@ run_cpu(time_t until)
 			cpu.pc++;
 			break;
 		}
-
+		switch (ins.opcode) {
+		case SEI:
+			cpu.status |= INTERRUPT_DISABLE;
+			break;
+		case CLD:
+			cpu.status &= ~DECIMAL_MODE;
+			break;
+		case LDA:
+			cpu.acc = arg;
+			cpu.status &= ~NEGATIVE_FLAG;
+			cpu.status |= (NEGATIVE_FLAG & arg);
+			break;
+		case LDX:
+			cpu.irx = arg;
+			cpu.status &= ~NEGATIVE_FLAG;
+			cpu.status |= (NEGATIVE_FLAG & arg);
+			break;
+		case STA:
+			WRITE_CPU_BUS(arg_hi, arg, cpu.acc);
+		case TXS:
+			cpu.sp = cpu.irx;
+			break;
+		case BPL:
+			if (!(cpu.status & NEGATIVE_FLAG)) {
+				cpu.pc += (int8_t)arg;
+				cpu_timestamp += NTSC_CPU_CYCLE;
+				if (pc_hi != cpu.pc / 0x100)
+					cpu_timestamp += NTSC_CPU_CYCLE;
+			}
+			break;
+		default:
+			fprintf(stderr, "unimplemented instruction\n");
+			exit(1);
+		}
 		cpu.pc++;
 		cpu_timestamp += NTSC_CPU_CYCLE * ins.cycles;
 	}
+
+	printf("pc: 0x%04x\n"
+	       "sp: 0x%02x acc: 0x%02x\n"
+	       " x: 0x%02x   y: 0x%02x\n",
+	    cpu.pc, cpu.sp, cpu.acc, cpu.irx, cpu.iry);
+	printf("status: ");
 	for (int i = 7; i >= 0; i--) {
 		putc((cpu.status >> i & 1) ? '1' : '0', stdout);
 	}
@@ -356,7 +404,7 @@ run_ppu(time_t until)
 	while (ppu_timestamp < until) {
 		ppu_timestamp += PPU_CYCLE;
 	}
-	exit(0);
+	ppu.status |= VBLANK;
 }
 
 int
